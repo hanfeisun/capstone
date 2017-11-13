@@ -1,14 +1,17 @@
 import pandas as pd
-import pandas as pd
+
+import matplotlib
+
+import matplotlib.pyplot as plt
 import json
 import os
-import seaborn as sns
+# import seaborn as sns
 import collections
 import scipy.sparse as sp
-import matplotlib.pyplot as plt
+
 import itertools
 import numpy as np
-import seaborn
+# import seaborn
 import operator
 from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
@@ -32,19 +35,20 @@ from keras.callbacks import ModelCheckpoint, CSVLogger
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
-
+import h5py
 from pandas_ml import ConfusionMatrix
 import langdetect
 
+# %matplotlib inline
 
 np.random.seed(0)
 BASE_DIR = ''
 GLOVE_DIR = 'glove.6B.100d.txt'
-MAX_SEQUENCE_LENGTH = 1000
+MAX_SEQUENCE_LENGTH = 100
 MAX_NB_WORDS = 20000
-EMBEDDING_DIM = int(''.join([s for s in GLOVE_DIR.split('/')[-1].split('.')[-2] if s.isdigit()])) # 100
-VALIDATION_SPLIT = 0.2
-PRELOAD = True
+EMBEDDING_DIM = int(''.join([s for s in GLOVE_DIR.split('/')[-1].split('.')[-2] if s.isdigit()]))  # 100
+VALIDATION_SPLIT = 0.1
+PRELOAD = False
 
 
 def load_glove_into_dict(glove_path):
@@ -117,6 +121,13 @@ def minority_balance_dataframe_by_multiple_categorical_variables(df, categorical
     return df
 
 
+def split_train_test_set(df):
+    msk = np.random.rand(len(df)) < 0.8
+    train = df[msk]
+    test = df[~msk]
+    return train, test
+
+
 langdetect_count = 0
 
 
@@ -131,50 +142,46 @@ def safe_detect(s):
         return 'unknown'
 
 
-if PRELOAD:
-    df_rev_balanced = pd.read_csv('balanced_reviews.csv')
-    tokenizer = joblib.load('tokenizer.pickle')
-    with pd.HDFStore('x_y_test_train.h5') as h:
-        X_train = h['X_train'].values
-        X_test = h['X_test'].values
-        y_train = h['y_train'].values
-        y_test = h['y_test'].values
+df_reviews = pd.read_csv('oneperline.csv')  # , encoding='utf-8')
+df_reviews['len'] = df_reviews.text.str.len()
+df_reviews['rating'] = df_reviews['rating'].round()
 
-    model = load_model('keras_model_updated.keras')
+df_reviews = df_reviews[df_reviews['len'].between(10, 4000)]
+#     df_reviews = df_reviews[df_reviews.language == 'en']
+# balancing dataset
+df_rev_balanced = minority_balance_dataframe_by_multiple_categorical_variables(
+    df_reviews,
+    categorical_columns=['rating'],
+    downsample_by=1
+)
 
-# features_from_gru = pd.read_csv('features_from_GRU_layer.csv')
+df_rev_balanced.to_csv('balanced_reviews.csv', encoding='utf-8')
 
-else:
-    df_reviews = pd.read_csv('reviews.csv')  # , encoding='utf-8')
-    df_reviews['len'] = df_reviews.text.str.len()
-    df_reviews = df_reviews[df_reviews['len'].between(10, 4000)]
-    #     df_reviews = df_reviews[df_reviews.language == 'en']
-    # balancing dataset
-    df_rev_balanced = minority_balance_dataframe_by_multiple_categorical_variables(
-        df_reviews,
-        categorical_columns=['stars'],
-        downsample_by=0.1
-    )
+tokenizer = Tokenizer(num_words=MAX_NB_WORDS)
+tokenizer.fit_on_texts(df_rev_balanced.text.tolist())
+joblib.dump(tokenizer, 'tokenizer.pickle')
 
-    df_rev_balanced.to_csv('balanced_reviews.csv', encoding='utf-8')
+WORD_INDEX_SORTED = sorted(tokenizer.word_index.items(), key=operator.itemgetter(1))
 
-    tokenizer = Tokenizer(nb_words=MAX_NB_WORDS)
-    tokenizer.fit_on_texts(df_rev_balanced.text.tolist())
-    joblib.dump(tokenizer, 'tokenizer.pickle')
+seqs = tokenizer.texts_to_sequences(df_rev_balanced.text.values)
+X = list(zip(pad_sequences(seqs, maxlen=MAX_SEQUENCE_LENGTH), df_rev_balanced[['length', 'turn']].values))
+Y = df_rev_balanced.rating.values.astype(int)
+Y_cat = to_categorical(Y)
+X_train, X_test, y_train, y_test = train_test_split(X, Y_cat, test_size=VALIDATION_SPLIT, random_state=9)
 
-    WORD_INDEX_SORTED = sorted(tokenizer.word_index.items(), key=operator.itemgetter(1))
+X_train_aux = np.array([i[1] for i in X_train], dtype='float32')
+X_train_aux = X_train_aux / np.max(X_train_aux, axis=0)
+X_train = np.array([i[0] for i in X_train])
 
-    seqs = tokenizer.texts_to_sequences(df_rev_balanced.text.values)
-    X = pad_sequences(seqs, maxlen=MAX_SEQUENCE_LENGTH)
-    Y = df_rev_balanced.stars.values.astype(int)
-    Y_cat = to_categorical(Y)
-    assert X.shape[0] == Y.shape[0]
-    X_train, X_test, y_train, y_test = train_test_split(X, Y_cat, test_size=0.2, random_state=9)
-    with pd.HDFStore('x_y_test_train.h5') as h:
-        h['X_train'] = pd.DataFrame(X_train)
-        h['X_test'] = pd.DataFrame(X_test)
-        h['y_train'] = pd.DataFrame(y_train)
-        h['y_test'] = pd.DataFrame(y_test)
+X_test_aux = np.array([i[1] for i in X_test], dtype='float32')
+X_test_aux = X_test_aux / np.max(X_test_aux, axis=0)
+X_test = np.array([i[0] for i in X_test])
+
+    # with pd.HDFStore('x_y_test_train.h5') as h:
+    #     h['X_train'] = pd.DataFrame(X_train)
+    #     h['X_test'] = pd.DataFrame(X_test)
+    #     h['y_train'] = pd.DataFrame(y_train)
+    #     h['y_test'] = pd.DataFrame(y_test)
 
 # prepare embedding matrix
 embedding_index = load_glove_into_dict(GLOVE_DIR)
@@ -183,43 +190,55 @@ embedding_matrix = np.zeros((nb_words, EMBEDDING_DIM))
 for word, i in tokenizer.word_index.items():
     if i >= MAX_NB_WORDS:
         continue
-    embedding_vector = embeddings_index.get(word)
+    embedding_vector = embedding_index.get(word)
     if embedding_vector is not None:
         # words not found in embedding index will be all-zeros.
         embedding_matrix[i] = embedding_vector
 
+df_rev_balanced.groupby('rating')['len'].hist(alpha=0.1)
+print('number of words in GLOVE: {}'.format(len(embedding_index)))
+print(WORD_INDEX_SORTED[0:100:10])
 
-df_rev_balanced.groupby('stars')['len'].hist(alpha=0.1)
-print('number of words in GLOVE: {}'.format(len(embeddings_index)))
-WORD_INDEX_SORTED[0:100:10]
-
-
-filepath="imp-{epoch:02d}-{val_acc:.2f}.hdf5"
+filepath = "imp-balanced-{epoch:02d}-{val_acc:.2f}.hdf5"
 checkpoint = ModelCheckpoint(filepath, monitor='val_acc', verbose=1, save_best_only=True, mode='max')
 csv_logger = CSVLogger('training_history.csv')
 history = History()
 callbacks_list = [checkpoint, history, csv_logger]
 
-model = Sequential()
+from keras.layers import Input, Embedding, LSTM, Dense, BatchNormalization
+from keras.models import Model
+import keras
 
-model.add(Embedding(input_dim=nb_words,
-                    output_dim=EMBEDDING_DIM,
-                    input_length=MAX_SEQUENCE_LENGTH,
-                    weights=[embedding_matrix],
-                    trainable=False)
-)
+lexical = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype='int32', name='lexical')
+length = Input(shape=(2,), dtype='float32', name='length')
 
-model.add(GRU(100, return_sequences=True))
-model.add(Dropout(0.2))
-model.add(GRU(100))
-model.add(Dropout(0.2))
-model.add(Dense(6, activation='softmax'))
+x = Embedding(input_dim=nb_words,
+              output_dim=EMBEDDING_DIM,
+              input_length=MAX_SEQUENCE_LENGTH,
+              weights=[embedding_matrix],
+              trainable=False)(lexical)
+
+x = GRU(50, return_sequences=True)(x)
+x = Dropout(0.2)(x)
+x = GRU(50)(x)
+x = Dropout(0.2)(x)
+x = keras.layers.concatenate([x, length])
+x = BatchNormalization()(x)
+x = Dense(20, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dense(20, activation='relu')(x)
+
+gru_output = Dense(6, activation='softmax', name='gru_output')(x)
+
+model = Model(inputs=[lexical, length], outputs=[gru_output])
+
+
 model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
 print(model.summary())
-model.fit(X_train,
-          y_train,
-          nb_epoch=30,
+model.fit({'lexical': X_train, 'length': X_train_aux},
+          {'gru_output': y_train},
+          epochs=30,
           batch_size=128,
-          validation_data=(X_test, y_test),
+          validation_data=({'lexical': X_test, 'length': X_test_aux}, {'gru_output': y_test}),
           callbacks=callbacks_list
-)
+          )
