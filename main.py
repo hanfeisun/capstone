@@ -79,17 +79,17 @@ def get_features_for_layer(X, trained_model, layer_number, batches=256):
     get_features = K.function([trained_model.layers[0].input, K.learning_phase()],
                               [trained_model.layers[layer_number].output])
 
-    if batches:
-        g = array_batch_yield(X, batches)
-        features = []
-        for batch in g:
-            feature_batch = get_features([batch, 0])
-            features.append(feature_batch)
-
-        features = np.concatenate(features, axis=1)[0]
-
-    else:
-        features = get_features([X, 0])
+    # if batches:
+    #     g = array_batch_yield(X, batches)
+    #     features = []
+    #     for batch in g:
+    #         feature_batch = get_features([batch, 0])
+    #         features.append(feature_batch)
+    #
+    #     features = np.concatenate(features, axis=1)[0]
+    #
+    # else:
+    features = get_features([X, 0])
 
     return features
 
@@ -225,8 +225,10 @@ x = Dropout(0.2)(x)
 x = keras.layers.concatenate([x, length])
 x = BatchNormalization()(x)
 x = Dense(20, activation='relu')(x)
+x = keras.layers.concatenate([x, length])
 x = BatchNormalization()(x)
 x = Dense(20, activation='relu')(x)
+x = keras.layers.concatenate([x, length])
 
 gru_output = Dense(6, activation='softmax', name='gru_output')(x)
 
