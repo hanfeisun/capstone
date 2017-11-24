@@ -22,7 +22,7 @@ from sklearn.model_selection import train_test_split
 from keras.callbacks import History
 from keras.datasets import imdb
 from keras.models import Sequential, save_model, load_model
-from keras.layers import Dense
+from keras.layers import Dense, TimeDistributed
 from keras.layers import LSTM, GRU
 from keras.layers import Flatten
 from keras.layers import Dropout
@@ -39,12 +39,17 @@ import h5py
 from pandas_ml import ConfusionMatrix
 import langdetect
 
+from keras.layers import Input, Embedding, LSTM, Dense, BatchNormalization
+from keras.models import Model
+import keras
+
 # %matplotlib inline
 
 np.random.seed(0)
 BASE_DIR = ''
 GLOVE_DIR = 'glove.6B.100d.txt'
-MAX_SEQUENCE_LENGTH = 100
+MAX_SEQUENCE_LENGTH = 40
+MAX_SENTENCE = 10
 MAX_NB_WORDS = 20000
 EMBEDDING_DIM = int(''.join([s for s in GLOVE_DIR.split('/')[-1].split('.')[-2] if s.isdigit()]))  # 100
 VALIDATION_SPLIT = 0.1
@@ -79,16 +84,6 @@ def get_features_for_layer(X, trained_model, layer_number, batches=256):
     get_features = K.function([trained_model.layers[0].input, K.learning_phase()],
                               [trained_model.layers[layer_number].output])
 
-    # if batches:
-    #     g = array_batch_yield(X, batches)
-    #     features = []
-    #     for batch in g:
-    #         feature_batch = get_features([batch, 0])
-    #         features.append(feature_batch)
-    #
-    #     features = np.concatenate(features, axis=1)[0]
-    #
-    # else:
     features = get_features([X, 0])
 
     return features
@@ -163,8 +158,26 @@ joblib.dump(tokenizer, 'tokenizer.pickle')
 
 WORD_INDEX_SORTED = sorted(tokenizer.word_index.items(), key=operator.itemgetter(1))
 
-seqs = tokenizer.texts_to_sequences(df_rev_balanced.text.values)
-X = list(zip(pad_sequences(seqs, maxlen=MAX_SEQUENCE_LENGTH), df_rev_balanced[['length', 'turn']].values))
+def truncate_or_pad(sentence, n):
+    sentence_seq = sentence.split("\n")
+    L =  len(sentence_seq)
+    if L >= n:
+        return sentence_seq[:n]
+    else:
+        return [""] * (n - L) + sentence_seq
+
+pad_sentence = df_rev_balanced.text.map(lambda x:truncate_or_pad(x, MAX_SENTENCE)).values
+
+flatten_pad_sentence = np.concatenate(pad_sentence).ravel()
+
+seqs = tokenizer.texts_to_sequences(flatten_pad_sentence)
+seqs = pad_sequences(seqs, maxlen=MAX_SEQUENCE_LENGTH)
+seqs = np.array(seqs).reshape([-1,MAX_SENTENCE, MAX_SEQUENCE_LENGTH])
+
+
+# TODO
+
+X = list(zip(seqs, df_rev_balanced[['length', 'turn']].values))
 Y = df_rev_balanced.rating.values.astype(int)
 Y_cat = to_categorical(Y)
 X_train, X_test, y_train, y_test = train_test_split(X, Y_cat, test_size=VALIDATION_SPLIT, random_state=9)
@@ -199,35 +212,38 @@ csv_logger = CSVLogger('training_history.csv')
 history = History()
 callbacks_list = [checkpoint, history, csv_logger]
 
-from keras.layers import Input, Embedding, LSTM, Dense, BatchNormalization
-from keras.models import Model
-import keras
+in_sentence = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype='int32')
 
-lexical = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype='int32', name='lexical')
-length = Input(shape=(2,), dtype='float32', name='length')
+embedded_sentence = Embedding(input_dim=nb_words,
+                              output_dim=EMBEDDING_DIM,
+                              input_length=MAX_SEQUENCE_LENGTH,
+                              weights=[embedding_matrix],
+                              trainable=False)(in_sentence)
 
-x = Embedding(input_dim=nb_words,
-              output_dim=EMBEDDING_DIM,
-              input_length=MAX_SEQUENCE_LENGTH,
-              weights=[embedding_matrix],
-              trainable=False)(lexical)
+gru_sentence = GRU(50, return_sequences=True)(embedded_sentence)
+gru_sentence = Dropout(0.2)(gru_sentence)
+gru_sentence = GRU(50)(gru_sentence)
+gru_sentence = Dropout(0.2)(gru_sentence)
+encoded_model = Model(in_sentence, gru_sentence)
 
-x = GRU(50, return_sequences=True)(x)
-x = Dropout(0.2)(x)
-x = GRU(50)(x)
-x = Dropout(0.2)(x)
-x = keras.layers.concatenate([x, length])
+sequence_input = Input(shape=(MAX_SENTENCE, MAX_SEQUENCE_LENGTH), dtype='int32', name='sentences')
+seq_encoded = TimeDistributed(encoded_model)(sequence_input)
+seq_encoded = Dropout(0.2)(seq_encoded)
+seq_encoded = GRU(50)(seq_encoded)
+
+x = seq_encoded
 x = BatchNormalization()(x)
 x = Dense(20, activation='relu')(x)
-x = keras.layers.concatenate([x, length])
+
 x = BatchNormalization()(x)
 x = Dense(20, activation='relu')(x)
-x = keras.layers.concatenate([x, length])
 
-gru_output = Dense(6, activation='softmax', name='gru_output')(x)
+gru_output = Dense(6, activation='softmax', name='softmax_output')(x)
 gru_output = Dense(1, activation='sigmoid', name='scalar_output')(gru_output)
 
-model = Model(inputs=[lexical, length], outputs=[gru_output])
+model = Model(inputs=[in_sentence], outputs=[gru_output])
+print(model.summary())
+raise
 import tensorflow as tf
 
 # model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
@@ -236,8 +252,8 @@ import tensorflow as tf
 model.compile(loss=keras.losses.binary_crossentropy, optimizer='rmsprop',
               metrics=[keras.metrics.mse, keras.metrics.binary_crossentropy])
 
-y_train = np.argmax(y_train, axis=1).reshape([-1,1])
-y_test = np.argmax(y_test, axis=1).reshape([-1,1])
+y_train = np.argmax(y_train, axis=1).reshape([-1, 1])
+y_test = np.argmax(y_test, axis=1).reshape([-1, 1])
 y_train = y_train / 5.
 y_test = y_test / 5.
 
@@ -246,7 +262,7 @@ model.fit({'lexical': X_train, 'length': X_train_aux},
           {'scalar_output': y_train},
           epochs=30,
           batch_size=128,
-          validation_data=({'lexical': X_test, 'length': X_test_aux}, {'scalar_output': y_test}),
+          validation_data=({'sentences': X_test, 'length': X_test_aux}, {'scalar_output': y_test}),
           callbacks=callbacks_list
           )
 #
