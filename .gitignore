@@ -1,2 +1,8 @@
 glove*
 *.json
+*.hdf5
+*.csv
+*.h5
+*.zip
+*.pickle
+.ipynb_checkpoints/

@@ -177,12 +177,6 @@ X_test_aux = np.array([i[1] for i in X_test], dtype='float32')
 X_test_aux = X_test_aux / np.max(X_test_aux, axis=0)
 X_test = np.array([i[0] for i in X_test])
 
-    # with pd.HDFStore('x_y_test_train.h5') as h:
-    #     h['X_train'] = pd.DataFrame(X_train)
-    #     h['X_test'] = pd.DataFrame(X_test)
-    #     h['y_train'] = pd.DataFrame(y_train)
-    #     h['y_test'] = pd.DataFrame(y_test)
-
 # prepare embedding matrix
 embedding_index = load_glove_into_dict(GLOVE_DIR)
 nb_words = min(MAX_NB_WORDS, len(WORD_INDEX_SORTED))
