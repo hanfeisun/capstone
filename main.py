@@ -193,8 +193,8 @@ df_rev_balanced.groupby('rating')['len'].hist(alpha=0.1)
 print('number of words in GLOVE: {}'.format(len(embedding_index)))
 print(WORD_INDEX_SORTED[0:100:10])
 
-filepath = "imp-balanced-{epoch:02d}-{val_acc:.2f}.hdf5"
-checkpoint = ModelCheckpoint(filepath, monitor='val_acc', verbose=1, save_best_only=True, mode='max')
+filepath = "imp-balanced-{epoch:02d}-{val_loss:.2f}.hdf5"
+checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True, mode='max')
 csv_logger = CSVLogger('training_history.csv')
 history = History()
 callbacks_list = [checkpoint, history, csv_logger]
@@ -225,25 +225,35 @@ x = Dense(20, activation='relu')(x)
 x = keras.layers.concatenate([x, length])
 
 gru_output = Dense(6, activation='softmax', name='gru_output')(x)
+gru_output = Dense(1, activation='sigmoid', name='scalar_output')(gru_output)
 
 model = Model(inputs=[lexical, length], outputs=[gru_output])
 import tensorflow as tf
 
-model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
-              metrics=[keras.metrics.categorical_accuracy, "accuracy"])
+# model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
+#               metrics=[keras.metrics.categorical_accuracy, "accuracy"])
+
+model.compile(loss=keras.losses.binary_crossentropy, optimizer='rmsprop',
+              metrics=[keras.metrics.mse, keras.metrics.binary_crossentropy])
+
+y_train = np.argmax(y_train, axis=1).reshape([-1,1])
+y_test = np.argmax(y_test, axis=1).reshape([-1,1])
+y_train = y_train / 5.
+y_test = y_test / 5.
+
 print(model.summary())
 model.fit({'lexical': X_train, 'length': X_train_aux},
-          {'gru_output': y_train},
+          {'scalar_output': y_train},
           epochs=30,
           batch_size=128,
-          validation_data=({'lexical': X_test, 'length': X_test_aux}, {'gru_output': y_test}),
+          validation_data=({'lexical': X_test, 'length': X_test_aux}, {'scalar_output': y_test}),
           callbacks=callbacks_list
           )
-
-y_test_predict = model.predict({'lexical': X_test, 'length': X_test_aux})
-y_test_predict_decode = np.argmax(y_test_predict, axis=1)
-y_test_decode = np.argmax(y_test, axis=1)
-
-import scipy
-
-correlation = scipy.stats.pearsonr(y_test_decode, y_test_predict_decode)
+#
+# y_test_predict = model.predict({'lexical': X_test, 'length': X_test_aux})
+# y_test_predict_decode = np.argmax(y_test_predict, axis=1)
+# y_test_decode = np.argmax(y_test, axis=1)
+#
+# import scipy
+#
+# correlation = scipy.stats.pearsonr(y_test_decode, y_test_predict_decode)
