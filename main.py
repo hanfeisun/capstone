@@ -175,20 +175,20 @@ seqs = pad_sequences(seqs, maxlen=MAX_SEQUENCE_LENGTH)
 seqs = np.array(seqs).reshape([-1,MAX_SENTENCE, MAX_SEQUENCE_LENGTH])
 
 
-# TODO
 
-X = list(zip(seqs, df_rev_balanced[['length', 'turn']].values))
+
+X = seqs
 Y = df_rev_balanced.rating.values.astype(int)
 Y_cat = to_categorical(Y)
 X_train, X_test, y_train, y_test = train_test_split(X, Y_cat, test_size=VALIDATION_SPLIT, random_state=9)
 
-X_train_aux = np.array([i[1] for i in X_train], dtype='float32')
-X_train_aux = X_train_aux / np.max(X_train_aux, axis=0)
-X_train = np.array([i[0] for i in X_train])
+# X_train_aux = np.array([i[1] for i in X_train], dtype='float32')
+# X_train_aux = X_train_aux / np.max(X_train_aux, axis=0)
+# X_train = np.array([i[0] for i in X_train])
 
-X_test_aux = np.array([i[1] for i in X_test], dtype='float32')
-X_test_aux = X_test_aux / np.max(X_test_aux, axis=0)
-X_test = np.array([i[0] for i in X_test])
+# X_test_aux = np.array([i[1] for i in X_test], dtype='float32')
+# X_test_aux = X_test_aux / np.max(X_test_aux, axis=0)
+# X_test = np.array([i[0] for i in X_test])
 
 # prepare embedding matrix
 embedding_index = load_glove_into_dict(GLOVE_DIR)
@@ -225,6 +225,7 @@ gru_sentence = Dropout(0.2)(gru_sentence)
 gru_sentence = GRU(50)(gru_sentence)
 gru_sentence = Dropout(0.2)(gru_sentence)
 encoded_model = Model(in_sentence, gru_sentence)
+print(encoded_model.summary())
 
 sequence_input = Input(shape=(MAX_SENTENCE, MAX_SEQUENCE_LENGTH), dtype='int32', name='sentences')
 seq_encoded = TimeDistributed(encoded_model)(sequence_input)
@@ -241,9 +242,9 @@ x = Dense(20, activation='relu')(x)
 gru_output = Dense(6, activation='softmax', name='softmax_output')(x)
 gru_output = Dense(1, activation='sigmoid', name='scalar_output')(gru_output)
 
-model = Model(inputs=[in_sentence], outputs=[gru_output])
+model = Model(inputs=[sequence_input], outputs=[gru_output])
 print(model.summary())
-raise
+
 import tensorflow as tf
 
 # model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
@@ -257,19 +258,18 @@ y_test = np.argmax(y_test, axis=1).reshape([-1, 1])
 y_train = y_train / 5.
 y_test = y_test / 5.
 
-print(model.summary())
-model.fit({'lexical': X_train, 'length': X_train_aux},
+
+model.fit({'sentences': X_train},
           {'scalar_output': y_train},
           epochs=30,
           batch_size=128,
-          validation_data=({'sentences': X_test, 'length': X_test_aux}, {'scalar_output': y_test}),
+          validation_data=({'sentences': X_test}, {'scalar_output': y_test}),
           callbacks=callbacks_list
           )
 #
-# y_test_predict = model.predict({'lexical': X_test, 'length': X_test_aux})
-# y_test_predict_decode = np.argmax(y_test_predict, axis=1)
-# y_test_decode = np.argmax(y_test, axis=1)
-#
-# import scipy
-#
-# correlation = scipy.stats.pearsonr(y_test_decode, y_test_predict_decode)
+y_test_predict = model.predict({'sentences': X_test})
+
+import scipy
+
+correlation = scipy.stats.pearsonr(y_test.ravel(), y_test_predict.ravel())
+print(correlation)
