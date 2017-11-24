@@ -227,9 +227,10 @@ x = keras.layers.concatenate([x, length])
 gru_output = Dense(6, activation='softmax', name='gru_output')(x)
 
 model = Model(inputs=[lexical, length], outputs=[gru_output])
+import tensorflow as tf
 
-
-model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
+model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
+              metrics=[keras.metrics.categorical_accuracy, "accuracy"])
 print(model.summary())
 model.fit({'lexical': X_train, 'length': X_train_aux},
           {'gru_output': y_train},
@@ -238,3 +239,11 @@ model.fit({'lexical': X_train, 'length': X_train_aux},
           validation_data=({'lexical': X_test, 'length': X_test_aux}, {'gru_output': y_test}),
           callbacks=callbacks_list
           )
+
+y_test_predict = model.predict({'lexical': X_test, 'length': X_test_aux})
+y_test_predict_decode = np.argmax(y_test_predict, axis=1)
+y_test_decode = np.argmax(y_test, axis=1)
+
+import scipy
+
+correlation = scipy.stats.pearsonr(y_test_decode, y_test_predict_decode)
