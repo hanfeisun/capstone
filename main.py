@@ -43,17 +43,21 @@ from keras.layers import Input, Embedding, LSTM, Dense, BatchNormalization
 from keras.models import Model
 import keras
 
+from keras import layers
+
 # %matplotlib inline
 
 np.random.seed(0)
 BASE_DIR = ''
 GLOVE_DIR = 'glove.6B.100d.txt'
-MAX_SEQUENCE_LENGTH = 40
-MAX_SENTENCE = 10
+MAX_WORD_PER_SENTENCE = 40
+MAX_SENTENCE_PER_SESSION = 20
 MAX_NB_WORDS = 20000
 EMBEDDING_DIM = int(''.join([s for s in GLOVE_DIR.split('/')[-1].split('.')[-2] if s.isdigit()]))  # 100
 VALIDATION_SPLIT = 0.1
 PRELOAD = False
+
+REGRESSION = False
 
 
 def load_glove_into_dict(glove_path):
@@ -158,26 +162,37 @@ joblib.dump(tokenizer, 'tokenizer.pickle')
 
 WORD_INDEX_SORTED = sorted(tokenizer.word_index.items(), key=operator.itemgetter(1))
 
+
 def truncate_or_pad(sentence, n):
-    sentence_seq = sentence.split("\n")
-    L =  len(sentence_seq)
+    sentence_seq = list(map(lambda x:x.strip(), sentence.split("\n")))
+    L = len(sentence_seq)
     if L >= n:
         return sentence_seq[:n]
     else:
         return [""] * (n - L) + sentence_seq
 
-pad_sentence = df_rev_balanced.text.map(lambda x:truncate_or_pad(x, MAX_SENTENCE)).values
+
+pad_sentence = df_rev_balanced.text.map(lambda x: truncate_or_pad(x, MAX_SENTENCE_PER_SESSION)).values
+
+
+def speaker_embedding_func(str):
+    if str.startswith("AAAAA"):
+        return [0, 1]
+    elif str.startswith("UUUUU"):
+        return [1, 0]
+    else:
+        return [0, 0]
+
+
+speaker_embedding = np.array([[speaker_embedding_func(sentence) for sentence in session] for session in pad_sentence])
 
 flatten_pad_sentence = np.concatenate(pad_sentence).ravel()
 
 seqs = tokenizer.texts_to_sequences(flatten_pad_sentence)
-seqs = pad_sequences(seqs, maxlen=MAX_SEQUENCE_LENGTH)
-seqs = np.array(seqs).reshape([-1,MAX_SENTENCE, MAX_SEQUENCE_LENGTH])
+seqs = pad_sequences(seqs, maxlen=MAX_WORD_PER_SENTENCE)
+seqs = np.array(seqs).reshape([-1, MAX_SENTENCE_PER_SESSION, MAX_WORD_PER_SENTENCE])
 
-
-
-
-X = seqs
+X = np.concatenate((seqs, speaker_embedding), axis=2)
 Y = df_rev_balanced.rating.values.astype(int)
 Y_cat = to_categorical(Y)
 X_train, X_test, y_train, y_test = train_test_split(X, Y_cat, test_size=VALIDATION_SPLIT, random_state=9)
@@ -206,70 +221,98 @@ df_rev_balanced.groupby('rating')['len'].hist(alpha=0.1)
 print('number of words in GLOVE: {}'.format(len(embedding_index)))
 print(WORD_INDEX_SORTED[0:100:10])
 
-filepath = "imp-balanced-{epoch:02d}-{val_loss:.2f}.hdf5"
-checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True, mode='max')
-csv_logger = CSVLogger('training_history.csv')
-history = History()
-callbacks_list = [checkpoint, history, csv_logger]
+if REGRESSION:
+    filepath = "imp-balanced-{epoch:02d}-{val_loss:.2f}.hdf5"
+    checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True, mode='max')
 
-in_sentence = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype='int32')
+else:
+    filepath = "imp-balanced-{epoch:02d}-{val_acc:.2f}.hdf5"
+    checkpoint = ModelCheckpoint(filepath, monitor='val_acc', verbose=1, save_best_only=True, mode='max')
 
-embedded_sentence = Embedding(input_dim=nb_words,
-                              output_dim=EMBEDDING_DIM,
-                              input_length=MAX_SEQUENCE_LENGTH,
-                              weights=[embedding_matrix],
-                              trainable=False)(in_sentence)
-
-gru_sentence = GRU(50, return_sequences=True)(embedded_sentence)
-gru_sentence = Dropout(0.2)(gru_sentence)
-gru_sentence = GRU(50)(gru_sentence)
-gru_sentence = Dropout(0.2)(gru_sentence)
-encoded_model = Model(in_sentence, gru_sentence)
-print(encoded_model.summary())
-
-sequence_input = Input(shape=(MAX_SENTENCE, MAX_SEQUENCE_LENGTH), dtype='int32', name='sentences')
-seq_encoded = TimeDistributed(encoded_model)(sequence_input)
-seq_encoded = Dropout(0.2)(seq_encoded)
-seq_encoded = GRU(50)(seq_encoded)
-
-x = seq_encoded
-x = BatchNormalization()(x)
-x = Dense(20, activation='relu')(x)
-
-x = BatchNormalization()(x)
-x = Dense(20, activation='relu')(x)
-
-gru_output = Dense(6, activation='softmax', name='softmax_output')(x)
-gru_output = Dense(1, activation='sigmoid', name='scalar_output')(gru_output)
-
-model = Model(inputs=[sequence_input], outputs=[gru_output])
-print(model.summary())
-
+# csv_logger = CSVLogger('training_history.csv')
+# history = History()
+# callbacks_list = [checkpoint, history, csv_logger]
+callbacks_list = [checkpoint]
 import tensorflow as tf
 
-# model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
-#               metrics=[keras.metrics.categorical_accuracy, "accuracy"])
+in_sentence = Input(shape=(MAX_WORD_PER_SENTENCE,), dtype='int32')
+sentence = layers.Lambda(lambda x: x[:, :MAX_SENTENCE_PER_SESSION])(in_sentence)
+e = Embedding(input_dim=nb_words,
+              output_dim=EMBEDDING_DIM,
+              input_length=MAX_WORD_PER_SENTENCE,
+              weights=[embedding_matrix],
+              trainable=False)(sentence)
 
-model.compile(loss=keras.losses.binary_crossentropy, optimizer='rmsprop',
-              metrics=[keras.metrics.mse, keras.metrics.binary_crossentropy])
+gru_output = e
+if False:
+    gru_output = GRU(50, return_sequences=True)(gru_output)
+gru_output = GRU(50)(gru_output)
+# gru_output = layers.concatenate([GRU(50)(gru_output), tf.keras.backend.constant([[1]])])
+encoded_model = Model(inputs=[in_sentence], outputs=[gru_output])
+print(encoded_model.summary())
 
-y_train = np.argmax(y_train, axis=1).reshape([-1, 1])
-y_test = np.argmax(y_test, axis=1).reshape([-1, 1])
-y_train = y_train / 5.
-y_test = y_test / 5.
+sequence_input = Input(shape=(MAX_SENTENCE_PER_SESSION, MAX_WORD_PER_SENTENCE), dtype='int32', name='sentences')
+sequence_aux_input = Input(shape=(MAX_SENTENCE_PER_SESSION, 2), dtype='float32', name='aux')
+
+seq_encoded = TimeDistributed(encoded_model)(sequence_input)
+# seq_encoded = layers.concatenate([seq_encoded, sequence_aux_input], axis=2)
+# seq_encoded = Dropout(0.2)(seq_encoded)
+seq_encoded = layers.Bidirectional(GRU(50))(seq_encoded)
+seq_encoded = Dropout(0.2)(seq_encoded)
+
+x = seq_encoded
+x = Dense(20, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dense(20, activation='relu')(x)
+x = BatchNormalization()(x)
+
+gru_output = Dense(6, activation='softmax', name='softmax_output')(x)
+if REGRESSION:
+    gru_output = Dense(1, activation='sigmoid', name='scalar_output')(gru_output)
+
+model = Model(inputs=[sequence_input, sequence_aux_input], outputs=[gru_output])
+print(model.summary())
+
+if REGRESSION:
+    model.compile(loss=keras.losses.binary_crossentropy, optimizer='rmsprop',
+                  metrics=[keras.metrics.mse, keras.metrics.binary_crossentropy])
+else:
+    model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
+                  metrics=[keras.metrics.categorical_crossentropy, "accuracy"])
 
 
-model.fit({'sentences': X_train},
-          {'scalar_output': y_train},
-          epochs=30,
-          batch_size=128,
-          validation_data=({'sentences': X_test}, {'scalar_output': y_test}),
-          callbacks=callbacks_list
-          )
+def prepare(X):
+    return {"sentences": X[:, :, :MAX_WORD_PER_SENTENCE],
+            "aux": np.array(X[:, :, MAX_WORD_PER_SENTENCE:], dtype="float")
+            }
+
+
+# here
+if REGRESSION:
+    y_train = np.argmax(y_train, axis=1).reshape([-1, 1])
+    y_test = np.argmax(y_test, axis=1).reshape([-1, 1])
+    y_train = y_train / 5.
+    y_test = y_test / 5.
+
+    model.fit(prepare(X_train),
+              {'scalar_output': y_train},
+              epochs=30,
+              batch_size=128,
+              validation_data=({'sentences': X_test}, {'scalar_output': y_test}),
+              callbacks=callbacks_list
+              )
+else:
+    model.fit(prepare(X_train),
+              {'softmax_output': y_train},
+              epochs=30,
+              batch_size=128,
+              validation_data=(prepare(X_test), {'softmax_output': y_test}),
+              callbacks=callbacks_list
+              )
+# #
+# y_test_predict = model.predict({'sentences': X_test})
 #
-y_test_predict = model.predict({'sentences': X_test})
-
-import scipy
-
-correlation = scipy.stats.pearsonr(y_test.ravel(), y_test_predict.ravel())
-print(correlation)
+# import scipy
+#
+# correlation = scipy.stats.pearsonr(y_test.ravel(), y_test_predict.ravel())
+# print(correlation)
