@@ -177,11 +177,11 @@ pad_sentence = df_rev_balanced.text.map(lambda x: truncate_or_pad(x, MAX_SENTENC
 
 def speaker_embedding_func(str):
     if str.startswith("AAAAA"):
-        return [0, 1]
+        return [0, 1] * 5
     elif str.startswith("UUUUU"):
-        return [1, 0]
+        return [1, 0] * 5
     else:
-        return [0, 0]
+        return [0, 0] * 5
 
 
 speaker_embedding = np.array([[speaker_embedding_func(sentence) for sentence in session] for session in pad_sentence])
@@ -252,11 +252,11 @@ encoded_model = Model(inputs=[in_sentence], outputs=[gru_output])
 print(encoded_model.summary())
 
 sequence_input = Input(shape=(MAX_SENTENCE_PER_SESSION, MAX_WORD_PER_SENTENCE), dtype='int32', name='sentences')
-sequence_aux_input = Input(shape=(MAX_SENTENCE_PER_SESSION, 2), dtype='float32', name='aux')
+sequence_aux_input = Input(shape=(MAX_SENTENCE_PER_SESSION, 10), dtype='float32', name='aux')
 
 seq_encoded = TimeDistributed(encoded_model)(sequence_input)
-# seq_encoded = layers.concatenate([seq_encoded, sequence_aux_input], axis=2)
-# seq_encoded = Dropout(0.2)(seq_encoded)
+seq_encoded = layers.concatenate([seq_encoded, sequence_aux_input], axis=2)
+seq_encoded = Dropout(0.2)(seq_encoded)
 seq_encoded = layers.Bidirectional(GRU(50))(seq_encoded)
 seq_encoded = Dropout(0.2)(seq_encoded)
 
@@ -274,16 +274,16 @@ model = Model(inputs=[sequence_input, sequence_aux_input], outputs=[gru_output])
 print(model.summary())
 
 if REGRESSION:
-    model.compile(loss=keras.losses.binary_crossentropy, optimizer='rmsprop',
+    model.compile(loss=keras.losses.binary_crossentropy, optimizer=keras.optimizers.rmsprop(),
                   metrics=[keras.metrics.mse, keras.metrics.binary_crossentropy])
 else:
-    model.compile(loss='categorical_crossentropy', optimizer='rmsprop',
+    model.compile(loss='categorical_crossentropy', optimizer=keras.optimizers.rmsprop(),
                   metrics=[keras.metrics.categorical_crossentropy, "accuracy"])
 
 
 def prepare(X):
-    return {"sentences": X[:, :, :MAX_WORD_PER_SENTENCE],
-            "aux": np.array(X[:, :, MAX_WORD_PER_SENTENCE:], dtype="float")
+    return {"sentences": np.copy(X[:, :, :MAX_WORD_PER_SENTENCE]),
+            "aux": np.copy(np.array(X[:, :, MAX_WORD_PER_SENTENCE:], dtype="float"))
             }
 
 
