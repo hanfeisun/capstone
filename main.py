@@ -5,7 +5,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import json
 import os
-# import seaborn as sns
 import collections
 import scipy.sparse as sp
 
@@ -32,12 +31,6 @@ from keras.layers.embeddings import Embedding
 from keras.preprocessing import sequence
 import keras.backend as K
 from keras.callbacks import ModelCheckpoint, CSVLogger
-from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
-from sklearn.pipeline import Pipeline
-import h5py
-from pandas_ml import ConfusionMatrix
-import langdetect
 
 from keras.layers import Input, Embedding, LSTM, Dense, BatchNormalization
 from keras.models import Model
@@ -50,14 +43,17 @@ from keras import layers
 np.random.seed(0)
 BASE_DIR = ''
 GLOVE_DIR = 'glove.6B.100d.txt'
-MAX_WORD_PER_SENTENCE = 40
-MAX_SENTENCE_PER_SESSION = 20
-MAX_NB_WORDS = 20000
+MAX_WORD_PER_SENTENCE = 128
+MAX_SENTENCE_PER_SESSION = 32
+MAX_NB_WORDS = 4096
 EMBEDDING_DIM = int(''.join([s for s in GLOVE_DIR.split('/')[-1].split('.')[-2] if s.isdigit()]))  # 100
 VALIDATION_SPLIT = 0.1
 PRELOAD = False
 
 REGRESSION = False
+
+SENTENCE_EMBEDDING_SIZE = None
+SESSION_EMBEDDING_SIZE = None
 
 
 def load_glove_into_dict(glove_path):
@@ -129,18 +125,6 @@ def split_train_test_set(df):
 
 langdetect_count = 0
 
-
-def safe_detect(s):
-    try:
-        global langdetect_count
-        langdetect_count += 1
-        if langdetect_count % 10000 == 0:
-            print("Detected languages for  {} reviews".format(count))
-        return langdetect.detect(s)
-    except:
-        return 'unknown'
-
-
 df_reviews = pd.read_csv('oneperline.csv')  # , encoding='utf-8')
 df_reviews['len'] = df_reviews.text.str.len()
 df_reviews['rating'] = df_reviews['rating'].round()
@@ -164,7 +148,7 @@ WORD_INDEX_SORTED = sorted(tokenizer.word_index.items(), key=operator.itemgetter
 
 
 def truncate_or_pad(sentence, n):
-    sentence_seq = list(map(lambda x:x.strip(), sentence.split("\n")))
+    sentence_seq = list(map(lambda x: x.strip(), sentence.split("\n")))
     L = len(sentence_seq)
     if L >= n:
         return sentence_seq[:n]
@@ -175,16 +159,109 @@ def truncate_or_pad(sentence, n):
 pad_sentence = df_rev_balanced.text.map(lambda x: truncate_or_pad(x, MAX_SENTENCE_PER_SESSION)).values
 
 
-def speaker_embedding_func(str):
+def sentence_embedding_func(last_str, str):
+    global SENTENCE_EMBEDDING_SIZE
+    words = len(str.split(" "))
+
     if str.startswith("AAAAA"):
-        return [0, 1] * 5
+        embed_speaker = [0, 1]
     elif str.startswith("UUUUU"):
-        return [1, 0] * 5
+        embed_speaker = [1, 0]
     else:
-        return [0, 0] * 5
+        embed_speaker = [0, 0]
+
+    if str.startswith("AAAAA") or str.startswith("UUUUU"):
+        str = str[8:]
+
+    embed_sentence_length = [min(len(str), 400), ]
+    embed_word_length = [min(len(str.strip().split(" ")), 100), ]
+
+    pos_word = ["love", "friend"]
+    neg_word = ["stupid", "idiot", "fuck"]
+    pos = False
+    neg = False
+    for p in pos_word:
+        if p in str:
+            pos = True
+            break
+
+    for n in neg_word:
+        if n in str:
+            neg = True
+            break
+
+    embed_sentiment = [1 if pos else 0, 1 if neg else 0]
+
+    if len(last_str) == 0 or len(str) == 0:
+        embed_overlap = [0,
+                         0,
+                         0,
+                         0,
+                         0,
+                         0]
+        embed_uniq_rate = [0, 0]
+    else:
+        this_vocab = set(str.strip("\n").split(" "))
+        last_vocab = set(str.strip("\n").split(" "))
+        embed_overlap = [1,
+                         len(this_vocab),
+                         len(last_vocab),
+                         len(this_vocab | last_vocab),
+                         len(this_vocab & last_vocab),
+                         len(this_vocab | last_vocab) / len(this_vocab & last_vocab),
+                         ]
+
+        embed_uniq_rate = [1, len(this_vocab) / words]
+
+    if "wh" in str or "how" in str:
+        embed_question = [1]
+    else:
+        embed_question = [0]
+
+    ret = embed_speaker + embed_sentence_length + embed_word_length + embed_sentiment + embed_uniq_rate + embed_question + embed_overlap
+    SENTENCE_EMBEDDING_SIZE = len(ret)
+    return ret
 
 
-speaker_embedding = np.array([[speaker_embedding_func(sentence) for sentence in session] for session in pad_sentence])
+def session_embedding_func(str):
+    global SESSION_EMBEDDING_SIZE
+
+    words = len(str.replace("\n", " ").split(" "))
+    turns = len(str.split("\n"))
+    embed_session_length = [min(len(str), 100), min(len(str), 1000), min(len(str), 5000)]
+    embed_session_words = [min(words, 100), min(words, 1000), min(words, 5000)]
+    embed_session_turns = [turns]
+    pos_word = ["love", "friend"]
+    neg_word = ["stupid", "idiot", "fuck"]
+    pos = False
+    neg = False
+    for p in pos_word:
+        if p in str:
+            pos = True
+            break
+
+    for n in neg_word:
+        if n in str:
+            neg = True
+            break
+
+    embed_sentiment = [1 if pos else 0, 1 if neg else 0]
+
+    embed_uniq_rate = [len(set(str.replace("\n", " ").split(" "))) / words]
+
+    ret = embed_session_length + embed_session_words + embed_session_turns + embed_sentiment + embed_uniq_rate
+    SESSION_EMBEDDING_SIZE = len(ret)
+    return ret
+
+
+X_sentence_aux_embedding = np.array(
+    [[sentence_embedding_func(last_sentence, sentence) for last_sentence, sentence in
+      zip([""] + session[:-1:], session[::])] for session in pad_sentence], dtype="float32")
+X_sentence_aux_embedding /= np.max(X_sentence_aux_embedding, axis=(0, 1,))
+
+X_session_aux_embedding = np.array([session_embedding_func(session) for session in df_rev_balanced.text.values],
+                                   dtype="float32")
+X_session_aux_embedding /= np.max(X_session_aux_embedding, axis=(0,))
 
 flatten_pad_sentence = np.concatenate(pad_sentence).ravel()
 
@@ -192,10 +269,28 @@ seqs = tokenizer.texts_to_sequences(flatten_pad_sentence)
 seqs = pad_sequences(seqs, maxlen=MAX_WORD_PER_SENTENCE)
 seqs = np.array(seqs).reshape([-1, MAX_SENTENCE_PER_SESSION, MAX_WORD_PER_SENTENCE])
 
-X = np.concatenate((seqs, speaker_embedding), axis=2)
+X = seqs
 Y = df_rev_balanced.rating.values.astype(int)
 Y_cat = to_categorical(Y)
-X_train, X_test, y_train, y_test = train_test_split(X, Y_cat, test_size=VALIDATION_SPLIT, random_state=9)
+X_train_glove, X_test_glove, y_train, y_test = train_test_split(X, Y_cat, test_size=VALIDATION_SPLIT, random_state=9)
+X_train_seten, X_test_seten, _, _ = train_test_split(X_sentence_aux_embedding, Y_cat,
+                                                     test_size=VALIDATION_SPLIT,
+                                                     random_state=9)
+X_train_sessi, X_test_sessi, _, _ = train_test_split(X_session_aux_embedding, Y_cat,
+                                                     test_size=VALIDATION_SPLIT,
+                                                     random_state=9)
+
+X_train = {
+    "glove": X_train_glove,
+    "sentence": X_train_seten,
+    "session": X_train_sessi
+}
+
+X_test = {
+    "glove": X_test_glove,
+    "sentence": X_test_seten,
+    "session": X_test_sessi,
+}
 
 # X_train_aux = np.array([i[1] for i in X_train], dtype='float32')
 # X_train_aux = X_train_aux / np.max(X_train_aux, axis=0)
@@ -234,6 +329,38 @@ else:
 # callbacks_list = [checkpoint, history, csv_logger]
 callbacks_list = [checkpoint]
 import tensorflow as tf
+from keras import initializers
+from keras.engine.topology import Layer, InputSpec
+
+
+class AttLayer(Layer):
+    def __init__(self, **kwargs):
+        self.init = initializers.glorot_normal
+        super(AttLayer, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        assert len(input_shape) == 3
+        self.W = self.add_weight(name='kernel',
+                                 shape=(input_shape[-1], 1),
+                                 initializer="glorot_normal",
+                                 trainable=True)
+
+        self.trainable_weights = [self.W]
+        super(AttLayer, self).build(input_shape)  # be sure you call this somewhere!
+
+    def call(self, x, mask=None):
+        eij = K.tanh(K.dot(x, self.W))
+
+        ai = K.exp(eij)
+
+        weights = ai / tf.expand_dims(K.sum(ai, axis=1), 1)
+        weighted_input = x * weights
+
+        return K.sum(weighted_input, axis=1)
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[-1])
+
 
 in_sentence = Input(shape=(MAX_WORD_PER_SENTENCE,), dtype='int32')
 sentence = layers.Lambda(lambda x: x[:, :MAX_SENTENCE_PER_SESSION])(in_sentence)
@@ -246,31 +373,42 @@ e = Embedding(input_dim=nb_words,
 gru_output = e
 if False:
     gru_output = GRU(50, return_sequences=True)(gru_output)
-gru_output = GRU(50)(gru_output)
+gru_output = layers.Bidirectional(GRU(50, return_sequences=True))(gru_output)
+gru_output = TimeDistributed(Dense(100))(gru_output)
+gru_output = AttLayer()(gru_output)
+
 # gru_output = layers.concatenate([GRU(50)(gru_output), tf.keras.backend.constant([[1]])])
 encoded_model = Model(inputs=[in_sentence], outputs=[gru_output])
 print(encoded_model.summary())
 
-sequence_input = Input(shape=(MAX_SENTENCE_PER_SESSION, MAX_WORD_PER_SENTENCE), dtype='int32', name='sentences')
-sequence_aux_input = Input(shape=(MAX_SENTENCE_PER_SESSION, 10), dtype='float32', name='aux')
+sequence_input = Input(shape=(MAX_SENTENCE_PER_SESSION, MAX_WORD_PER_SENTENCE), dtype='int32', name='glove')
+sentence_embedding_input = Input(shape=(MAX_SENTENCE_PER_SESSION, SENTENCE_EMBEDDING_SIZE), dtype='float32',
+                                 name='sentence')
+session_embedding_input = Input(shape=(SESSION_EMBEDDING_SIZE,), dtype='float32', name='session')
 
-seq_encoded = TimeDistributed(encoded_model)(sequence_input)
-seq_encoded = layers.concatenate([seq_encoded, sequence_aux_input], axis=2)
-seq_encoded = Dropout(0.2)(seq_encoded)
-seq_encoded = layers.Bidirectional(GRU(50))(seq_encoded)
-seq_encoded = Dropout(0.2)(seq_encoded)
-
+naive = True
+if not naive:
+    seq_encoded = TimeDistributed(encoded_model)(sequence_input)
+    seq_encoded = layers.concatenate([seq_encoded, sentence_embedding_input], axis=2)
+else:
+    seq_encoded = sentence_embedding_input
+# seq_encoded = Dropout(0.2)(seq_encoded)
+if False:
+    seq_encoded = layers.Bidirectional(GRU(32, return_sequences=True))(seq_encoded)
+    seq_encoded = AttLayer()(seq_encoded)
+else:
+    seq_encoded = Dense(100)(layers.Flatten(seq_encoded))
+seq_encoded = layers.concatenate([seq_encoded, session_embedding_input], axis=1)
 x = seq_encoded
-x = Dense(20, activation='relu')(x)
-x = BatchNormalization()(x)
-x = Dense(20, activation='relu')(x)
-x = BatchNormalization()(x)
-
-gru_output = Dense(6, activation='softmax', name='softmax_output')(x)
+gru_output = Dense(32, activation='relu')(x)
+gru_output = BatchNormalization()(gru_output)
+gru_output = Dense(16, activation='relu')(gru_output)
+gru_output = BatchNormalization()(gru_output)
+gru_output = Dense(6, activation='softmax', name='softmax_output')(gru_output)
 if REGRESSION:
     gru_output = Dense(1, activation='sigmoid', name='scalar_output')(gru_output)
 
-model = Model(inputs=[sequence_input, sequence_aux_input], outputs=[gru_output])
+model = Model(inputs=[sequence_input, sentence_embedding_input, session_embedding_input], outputs=[gru_output])
 print(model.summary())
 
 if REGRESSION:
@@ -280,33 +418,25 @@ else:
     model.compile(loss='categorical_crossentropy', optimizer=keras.optimizers.rmsprop(),
                   metrics=[keras.metrics.categorical_crossentropy, "accuracy"])
 
-
-def prepare(X):
-    return {"sentences": np.copy(X[:, :, :MAX_WORD_PER_SENTENCE]),
-            "aux": np.copy(np.array(X[:, :, MAX_WORD_PER_SENTENCE:], dtype="float"))
-            }
-
-
-# here
 if REGRESSION:
     y_train = np.argmax(y_train, axis=1).reshape([-1, 1])
     y_test = np.argmax(y_test, axis=1).reshape([-1, 1])
     y_train = y_train / 5.
     y_test = y_test / 5.
 
-    model.fit(prepare(X_train),
+    model.fit(X_train,
               {'scalar_output': y_train},
-              epochs=30,
+              epochs=60,
               batch_size=128,
-              validation_data=({'sentences': X_test}, {'scalar_output': y_test}),
+              validation_data=(X_test, {'scalar_output': y_test}),
               callbacks=callbacks_list
               )
 else:
-    model.fit(prepare(X_train),
+    model.fit(X_train,
               {'softmax_output': y_train},
               epochs=30,
               batch_size=128,
-              validation_data=(prepare(X_test), {'softmax_output': y_test}),
+              validation_data=(X_test, {'softmax_output': y_test}),
               callbacks=callbacks_list
               )
 # #

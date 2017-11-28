@@ -3,7 +3,7 @@ import json
 from stat_parser import Parser
 parser = Parser()
 def append_question(x):
-
+    return x
     try:
         result = parser.parse(x)
         if result._label in ["SBARQ"]:
